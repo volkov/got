@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"time"
 )
 
 type Projects struct {
@@ -31,6 +32,8 @@ func main() {
 		listConfigurations(c, *id)
 	case "build":
 		buildConfiguration(c, *id, *branch)
+	case "wait":
+		waitForBuildToFinish(c, *id)
 	default:
 		fmt.Println("Unknown command")
 	}
@@ -147,15 +150,7 @@ func listConfigurations(c Credentials, id string) {
 func buildConfiguration(c Credentials, id, branch string) {
 	url := fmt.Sprintf("https://%s/httpAuth/app/rest/buildQueue", c.Host)
 
-	// Form the XML body
-	var body string
-	if branch != "" {
-		body = fmt.Sprintf(`<build branchName="%s"><buildType id="%s"/></build>`, branch, id)
-	} else {
-		body = fmt.Sprintf(`<build><buildType id="%s"/></build>`, id)
-	}
-
-	req, err := http.NewRequest("POST", url, strings.NewReader(body))
+	req, err := http.NewRequest("POST", url, strings.NewReader(formRequestBody(branch, id)))
 	if err != nil {
 		fmt.Println(err)
 		return
@@ -165,11 +160,89 @@ func buildConfiguration(c Credentials, id, branch string) {
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("Content-Type", "application/xml")
 
-	_, err = http.DefaultClient.Do(req)
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		fmt.Println(err)
 		return
 	}
 
-	fmt.Println("Build started")
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+	//print resp body
+	fmt.Println(string(respBody))
+
+	// Get the build ID from the response
+	var build struct {
+		Id int `json:"id"`
+	}
+	err = json.Unmarshal(respBody, &build)
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+
+	fmt.Println("Build started ", build.Id, "...")
+	//wait
+	waitForBuildToFinish(c, fmt.Sprintf("%d", build.Id))
+
+}
+
+func formRequestBody(branch string, id string) string {
+	// Form the XML body
+	var requestBody string
+	if branch != "" {
+		requestBody = fmt.Sprintf(`<build branchName="%s"><buildType id="%s"/></build>`, branch, id)
+	} else {
+		requestBody = fmt.Sprintf(`<build><buildType id="%s"/></build>`, id)
+	}
+	return requestBody
+}
+
+func waitForBuildToFinish(c Credentials, buildId string) {
+	buildURL := fmt.Sprintf("https://%s/httpAuth/app/rest/builds/id:%s", c.Host, buildId)
+
+	// Poll the build status until the build is finished
+	for {
+		req, err := http.NewRequest("GET", buildURL, nil)
+		if err != nil {
+			fmt.Println(err)
+			return
+		}
+
+		req.SetBasicAuth(c.Username, c.Password)
+		req.Header.Set("Accept", "application/json")
+
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			fmt.Println(err)
+			return
+		}
+
+		body, err := io.ReadAll(resp.Body)
+		if err != nil {
+			fmt.Println(err)
+			return
+		}
+
+		var build struct {
+			State string `json:"state"`
+		}
+		err = json.Unmarshal(body, &build)
+		if err != nil {
+			fmt.Println(err)
+			return
+		}
+		fmt.Println("Build state:", build.State)
+		if build.State != "running" && build.State != "queued" {
+			break
+		}
+
+		// Wait for a while before polling again
+		time.Sleep(5 * time.Second)
+	}
+
+	fmt.Println("Build finished")
 }
