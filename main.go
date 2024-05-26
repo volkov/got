@@ -75,7 +75,12 @@ func listProjects(c Credentials) {
 		fmt.Println(err)
 		return
 	}
-	defer resp.Body.Close()
+	defer func(Body io.ReadCloser) {
+		closeErr := Body.Close()
+		if err == nil {
+			err = closeErr
+		}
+	}(resp.Body)
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -126,7 +131,12 @@ func listConfigurations(c Credentials, id string) {
 		fmt.Println(err)
 		return
 	}
-	defer resp.Body.Close()
+	defer func(Body io.ReadCloser) {
+		closeErr := Body.Close()
+		if err == nil {
+			err = closeErr
+		}
+	}(resp.Body)
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -148,12 +158,23 @@ func listConfigurations(c Credentials, id string) {
 }
 
 func buildConfiguration(c Credentials, id, branch string) {
+	buildId, done := startBuild(c, id, branch)
+	if done {
+		return
+	}
+	fmt.Println("Build started ", buildId, "...")
+	//wait
+	waitForBuildToFinish(c, fmt.Sprintf("%d", buildId))
+
+}
+
+func startBuild(c Credentials, id string, branch string) (int, bool) {
 	url := fmt.Sprintf("https://%s/httpAuth/app/rest/buildQueue", c.Host)
 
 	req, err := http.NewRequest("POST", url, strings.NewReader(formRequestBody(branch, id)))
 	if err != nil {
 		fmt.Println(err)
-		return
+		return 0, true
 	}
 
 	req.SetBasicAuth(c.Username, c.Password)
@@ -163,13 +184,20 @@ func buildConfiguration(c Credentials, id, branch string) {
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		fmt.Println(err)
-		return
+		return 0, true
 	}
+
+	defer func(Body io.ReadCloser) {
+		closeErr := Body.Close()
+		if err == nil {
+			err = closeErr
+		}
+	}(resp.Body)
 
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
 		fmt.Println(err)
-		return
+		return 0, true
 	}
 	//print resp body
 	fmt.Println(string(respBody))
@@ -181,13 +209,11 @@ func buildConfiguration(c Credentials, id, branch string) {
 	err = json.Unmarshal(respBody, &build)
 	if err != nil {
 		fmt.Println(err)
-		return
+		return 0, true
 	}
 
-	fmt.Println("Build started ", build.Id, "...")
-	//wait
-	waitForBuildToFinish(c, fmt.Sprintf("%d", build.Id))
-
+	buildId := build.Id
+	return buildId, false
 }
 
 func formRequestBody(branch string, id string) string {
@@ -206,37 +232,12 @@ func waitForBuildToFinish(c Credentials, buildId string) {
 
 	// Poll the build status until the build is finished
 	for {
-		req, err := http.NewRequest("GET", buildURL, nil)
-		if err != nil {
-			fmt.Println(err)
+		state, done := getState(c, buildURL)
+		if done {
 			return
 		}
-
-		req.SetBasicAuth(c.Username, c.Password)
-		req.Header.Set("Accept", "application/json")
-
-		resp, err := http.DefaultClient.Do(req)
-		if err != nil {
-			fmt.Println(err)
-			return
-		}
-
-		body, err := io.ReadAll(resp.Body)
-		if err != nil {
-			fmt.Println(err)
-			return
-		}
-
-		var build struct {
-			State string `json:"state"`
-		}
-		err = json.Unmarshal(body, &build)
-		if err != nil {
-			fmt.Println(err)
-			return
-		}
-		fmt.Println("Build state:", build.State)
-		if build.State != "running" && build.State != "queued" {
+		fmt.Println("Build state:", state)
+		if state != "running" && state != "queued" {
 			break
 		}
 
@@ -245,4 +246,45 @@ func waitForBuildToFinish(c Credentials, buildId string) {
 	}
 
 	fmt.Println("Build finished")
+}
+
+func getState(c Credentials, buildURL string) (string, bool) {
+	req, err := http.NewRequest("GET", buildURL, nil)
+	if err != nil {
+		fmt.Println(err)
+		return "", true
+	}
+
+	req.SetBasicAuth(c.Username, c.Password)
+	req.Header.Set("Accept", "application/json")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		fmt.Println(err)
+		return "", true
+	}
+
+	defer func(Body io.ReadCloser) {
+		closeErr := Body.Close()
+		if err == nil {
+			err = closeErr
+		}
+	}(resp.Body)
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		fmt.Println(err)
+		return "", true
+	}
+
+	var build struct {
+		State string `json:"state"`
+	}
+	err = json.Unmarshal(body, &build)
+	if err != nil {
+		fmt.Println(err)
+		return "", true
+	}
+	state := build.State
+	return state, false
 }
